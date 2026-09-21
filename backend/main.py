@@ -206,87 +206,26 @@ def build_queries(profile: Dict[str, Any]) -> List[str]:
     return queries[:6]
 
 def serper_search(query: str, hours: int) -> List[Dict[str, Any]]:
-    """
-    Search Google through Serper for public LinkedIn recruiter posts.
-
-    This version is intentionally fault-tolerant:
-    - strips accidental whitespace from the API key
-    - first tries a freshness-filtered request
-    - retries with the smallest valid payload if Serper returns HTTP 400
-    - returns an empty result instead of crashing the /api/jds endpoint
-    """
-    key = (os.getenv("SERPER_API_KEY") or "").strip()
+    key = os.getenv("SERPER_API_KEY")
     if not key:
         return []
 
-    headers = {
-        "X-API-KEY": key,
-        "Content-Type": "application/json",
-    }
-
-    # First request: include freshness and US/English targeting.
-    payload = {
-        "q": query,
-        "num": 10,
-        "gl": "us",
-        "hl": "en",
-        "tbs": "qdr:h" if hours <= 1 else "qdr:d",
-    }
-
-    try:
-        resp = requests.post(
-            "https://google.serper.dev/search",
-            headers=headers,
-            json=payload,
-            timeout=25,
-        )
-
-        # Some Serper accounts/queries can reject optional parameters with 400.
-        # Retry with the smallest supported payload.
-        if resp.status_code == 400:
-            fallback_payload = {
-                "q": query,
-                "num": 10,
-            }
-            resp = requests.post(
-                "https://google.serper.dev/search",
-                headers=headers,
-                json=fallback_payload,
-                timeout=25,
-            )
-
-        if not resp.ok:
-            print(
-                "SERPER_ERROR",
-                "status=", resp.status_code,
-                "body=", resp.text[:500],
-                "query=", query[:250],
-            )
-            return []
-
-        data = resp.json()
-        return data.get("organic", [])
-
-    except requests.RequestException as exc:
-        print("SERPER_REQUEST_EXCEPTION", repr(exc), "query=", query[:250])
-        return []
-    except ValueError as exc:
-        print("SERPER_JSON_EXCEPTION", repr(exc), "query=", query[:250])
-        return []
-
+    tbs = "qdr:h" if hours <= 1 else "qdr:d"
+    resp = requests.post(
+        "https://google.serper.dev/search",
+        headers={"X-API-KEY": key, "Content-Type": "application/json"},
+        json={"q": query, "num": 20, "tbs": tbs},
+        timeout=25,
+    )
+    resp.raise_for_status()
+    return resp.json().get("organic", [])
 
 def fetch_linkedin_post_results(profile: Dict[str, Any], hours: int) -> List[Dict[str, Any]]:
     seen = set()
     out = []
 
     for query in build_queries(profile):
-        try:
-            search_results = serper_search(query, hours)
-        except Exception as exc:
-            print("LINKEDIN_SEARCH_EXCEPTION", repr(exc), "query=", query[:250])
-            search_results = []
-
-        for item in search_results:
+        for item in serper_search(query, hours):
             url = item.get("link", "")
             if "linkedin.com" not in url:
                 continue
@@ -351,14 +290,6 @@ def get_jds(
     if not os.getenv("SERPER_API_KEY"):
         return {"jds": [], "message": "SERPER_API_KEY is not configured on Render."}
 
-    try:
-        jds = fetch_linkedin_post_results(profile, hours)
-    except Exception as exc:
-        print("JD_FETCH_EXCEPTION", repr(exc))
-        return {
-            "jds": [],
-            "message": "Live JD search failed temporarily. Check Render logs for SERPER_ERROR details."
-        }
-
+    jds = fetch_linkedin_post_results(profile, hours)
     jds = [j for j in jds if j["match"] >= min_match and not j["blocked"]]
     return {"jds": jds}
