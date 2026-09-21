@@ -1,5 +1,5 @@
 
-const API_BASE = localStorage.getItem("jobmatch_api") || "http://localhost:8000";
+const API_BASE = "https://ai-job-analyse.onrender.com";
 
 const state = {
   profile: JSON.parse(localStorage.getItem("jobmatch_profile") || "null"),
