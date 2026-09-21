@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JobMatch AI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">JM</div>
+        <div>
+          <h1>JobMatch AI</h1>
+          <p>Resume → matched jobs</p>
+        </div>
+      </div>
+
+      <nav>
+        <button class="nav-btn active" data-view="dashboard">Dashboard</button>
+        <button class="nav-btn" data-view="resume">Resume</button>
+        <button class="nav-btn" data-view="jobs">Matched Jobs</button>
+        <button class="nav-btn" data-view="applied">Applied</button>
+      </nav>
+
+      <div class="sidebar-note">
+        <strong>Version 1</strong>
+        <span>Live LinkedIn ingestion needs an approved/authorized data source. This build is ready to connect to one.</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h2 id="pageTitle">Dashboard</h2>
+          <p id="pageSubtitle">Upload your resume and view only matching jobs.</p>
+        </div>
+        <button id="refreshBtn" class="primary-btn">Refresh Jobs</button>
+      </header>
+
+      <section id="dashboardView" class="view active">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <span>Resume</span>
+            <strong id="resumeStatus">Not uploaded</strong>
+          </div>
+          <div class="stat-card">
+            <span>Matched Jobs</span>
+            <strong id="matchedCount">0</strong>
+          </div>
+          <div class="stat-card">
+            <span>90%+ Matches</span>
+            <strong id="strongCount">0</strong>
+          </div>
+          <div class="stat-card">
+            <span>Applied</span>
+            <strong id="appliedCount">0</strong>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Quick Resume Upload</h3>
+              <p>Upload PDF or DOCX. The backend extracts your skills and experience.</p>
+            </div>
+          </div>
+
+          <label class="upload-box" for="resumeFile">
+            <input id="resumeFile" type="file" accept=".pdf,.docx" hidden />
+            <div class="upload-icon">↑</div>
+            <div>
+              <strong>Choose resume</strong>
+              <span>PDF or DOCX</span>
+            </div>
+          </label>
+          <div id="uploadMessage" class="message"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Top Matches</h3>
+              <p>Only jobs passing your current filters are shown.</p>
+            </div>
+          </div>
+          <div id="dashboardJobs" class="jobs-grid"></div>
+        </div>
+      </section>
+
+      <section id="resumeView" class="view">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Resume Profile</h3>
+              <p>Extracted profile used by the matching engine.</p>
+            </div>
+          </div>
+          <div id="profileEmpty" class="empty-state">
+            Upload a resume to generate your profile.
+          </div>
+          <div id="profileCard" class="profile-card hidden">
+            <div class="profile-row"><span>Name</span><strong id="profileName">—</strong></div>
+            <div class="profile-row"><span>Experience</span><strong id="profileYears">—</strong></div>
+            <div class="profile-row"><span>Primary Role</span><strong id="profileRole">—</strong></div>
+            <div>
+              <span class="muted">Detected Skills</span>
+              <div id="profileSkills" class="chips"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="jobsView" class="view">
+        <div class="panel">
+          <div class="filters">
+            <div>
+              <label>Posted</label>
+              <select id="timeFilter">
+                <option value="0.5">Last 30 minutes</option>
+                <option value="1">Last 1 hour</option>
+                <option value="3">Last 3 hours</option>
+                <option value="6">Last 6 hours</option>
+                <option value="12">Last 12 hours</option>
+                <option value="24" selected>Last 24 hours</option>
+              </select>
+            </div>
+            <div>
+              <label>Match</label>
+              <select id="matchFilter">
+                <option value="70">70%+</option>
+                <option value="80">80%+</option>
+                <option value="90" selected>90%+</option>
+                <option value="95">95%+</option>
+              </select>
+            </div>
+            <div>
+              <label>Employment</label>
+              <select id="typeFilter">
+                <option value="all">All</option>
+                <option value="C2C" selected>C2C</option>
+                <option value="W2">W2</option>
+                <option value="1099">1099</option>
+              </select>
+            </div>
+            <div>
+              <label>Visa</label>
+              <select id="visaFilter">
+                <option value="all">Any Visa</option>
+                <option value="H1B">H1B</option>
+                <option value="USC">USC</option>
+                <option value="H4-EAD">H4-EAD</option>
+                <option value="OPT">OPT</option>
+              </select>
+            </div>
+            <div>
+              <label>Work Model</label>
+              <select id="workFilter">
+                <option value="all">All</option>
+                <option value="Remote">Remote</option>
+                <option value="Hybrid">Hybrid</option>
+                <option value="Onsite">Onsite</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div id="jobsList" class="jobs-grid"></div>
+      </section>
+
+      <section id="appliedView" class="view">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Applied Jobs</h3>
+              <p>Jobs you marked as applied.</p>
+            </div>
+          </div>
+          <div id="appliedJobs" class="jobs-grid"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="jobCardTemplate">
+    <article class="job-card">
+      <div class="job-top">
+        <div>
+          <span class="source-badge"></span>
+          <h3 class="job-title"></h3>
+          <p class="job-company"></p>
+        </div>
+        <div class="match-badge"></div>
+      </div>
+
+      <div class="job-meta">
+        <span class="job-location"></span>
+        <span class="job-model"></span>
+        <span class="job-type"></span>
+        <span class="job-visa"></span>
+        <span class="job-posted"></span>
+      </div>
+
+      <div class="skills-row"></div>
+
+      <div class="hard-filter"></div>
+
+      <div class="job-actions">
+        <a class="secondary-btn apply-link" target="_blank" rel="noopener noreferrer">Open Job</a>
+        <button class="primary-btn mark-applied">Mark Applied</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
