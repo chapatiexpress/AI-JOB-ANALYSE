@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from docx import Document
 from pypdf import PdfReader
 
-app = FastAPI(title="JD Match AI API", version="2.1.0")
+app = FastAPI(title="JD Match AI API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
