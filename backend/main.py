@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from docx import Document
 from pypdf import PdfReader
 
-app = FastAPI(title="JD Match AI API", version="2.2.0")
+app = FastAPI(title="JD Match AI API", version="2.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -349,18 +349,22 @@ def score(profile: Dict[str, Any], jd_text: str) -> tuple[int, List[str], List[s
 def build_queries(profile: Dict[str, Any]) -> List[str]:
     skills = set(profile.get("skills", []))
 
-    # Keep Serper queries simple. Free Serper accounts can reject
-    # complex Google operator patterns with nested quotes / OR groups.
+    # Broad but simple queries. Complex nested Google operators can be rejected
+    # by Serper, so use several focused searches instead.
     if "Java" in skills:
         return [
-            "site:linkedin.com/posts C2C Java Full Stack hiring",
-            "site:linkedin.com/posts C2C Java Spring Boot hiring",
-            "site:linkedin.com/posts C2C Java Microservices hiring",
-            "site:linkedin.com/posts C2C Java Angular hiring",
-            "site:linkedin.com/posts C2C Java React hiring",
-            "site:linkedin.com/posts C2C Java AWS Kafka hiring",
-            "site:linkedin.com/posts C2C Java Platform Engineer hiring",
-            "site:linkedin.com/posts H1B C2C Senior Java hiring",
+            "site:linkedin.com/posts Java C2C hiring",
+            "site:linkedin.com/posts Java Full Stack C2C",
+            "site:linkedin.com/posts Java Spring Boot C2C",
+            "site:linkedin.com/posts Java Microservices C2C",
+            "site:linkedin.com/posts Java Angular C2C",
+            "site:linkedin.com/posts Java React C2C",
+            "site:linkedin.com/posts Java AWS C2C",
+            "site:linkedin.com/posts Java Kafka C2C",
+            "site:linkedin.com/posts Senior Java C2C",
+            "site:linkedin.com/posts Lead Java C2C",
+            "site:linkedin.com/posts H1B C2C Java hiring",
+            "site:linkedin.com/posts Any Visa C2C Java hiring",
         ]
 
     top = list(skills)[:3]
@@ -369,7 +373,60 @@ def build_queries(profile: Dict[str, Any]) -> List[str]:
         query += " " + " ".join(top)
     return [query]
 
-def serper_search(query: str, hours: int) -> List[Dict[str, Any]]:
+
+def is_hiring_post(text: str) -> bool:
+    """Reject normal/social LinkedIn posts that only happen to contain tech keywords."""
+    lower = text.lower()
+
+    hiring_signals = [
+        r"\bhiring\b", r"\burgent hiring\b", r"\bimmediate hiring\b",
+        r"\bopening(?:s)?\b", r"\bjob opportunity\b", r"\bjob requirement\b",
+        r"\brequirement\b", r"\bposition\b", r"\brole\b",
+        r"\blooking for\b", r"\bseeking\b", r"\bwe are hiring\b",
+        r"\binterested candidates\b", r"\bshare (?:your )?resume\b",
+        r"\bsend (?:your )?resume\b", r"\bapply now\b",
+    ]
+    jd_signals = [
+        r"\bc2c\b", r"corp[- ]?to[- ]?corp", r"\bw2\b",
+        r"\bcontract\b", r"\bduration\b", r"\blocation\b",
+        r"\bvisa\b", r"\bh1b\b", r"\brate\b",
+        r"\byears? of experience\b", r"\bmust[- ]have\b",
+        r"\brequired skills?\b", r"\bjob description\b",
+    ]
+    social_noise = [
+        r"guess the subject", r"happy birthday", r"congratulations",
+        r"motivational", r"meme", r"poll", r"thought of the day",
+    ]
+
+    if any(re.search(p, lower, re.I) for p in social_noise):
+        return False
+
+    hiring_count = sum(bool(re.search(p, lower, re.I)) for p in hiring_signals)
+    jd_count = sum(bool(re.search(p, lower, re.I)) for p in jd_signals)
+    return hiring_count >= 1 and jd_count >= 1
+
+
+def linkedin_activity_id(url: str) -> str | None:
+    """Extract the immutable LinkedIn activity id from a post URL."""
+    patterns = [
+        r"activity[-:](\d{15,22})",
+        r"urn:li:activity:(\d{15,22})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, url, re.I)
+        if m:
+            return m.group(1)
+    return None
+
+
+def canonical_linkedin_post_url(url: str) -> str | None:
+    """Use a stable feed/update URL so clicking opens the exact activity."""
+    activity_id = linkedin_activity_id(url)
+    if not activity_id:
+        return None
+    return f"https://www.linkedin.com/feed/update/urn:li:activity:{activity_id}"
+
+def serper_search(query: str, hours: int, page: int = 1) -> List[Dict[str, Any]]:
     key = (os.getenv("SERPER_API_KEY") or "").strip()
     if not key:
         return []
@@ -377,6 +434,7 @@ def serper_search(query: str, hours: int) -> List[Dict[str, Any]]:
     payload = {
         "q": query,
         "num": 10,
+        "page": page,
         "gl": "us",
         "hl": "en",
         "tbs": "qdr:h" if hours <= 1 else "qdr:d",
@@ -390,9 +448,9 @@ def serper_search(query: str, hours: int) -> List[Dict[str, Any]]:
             timeout=25,
         )
 
-        # If Serper rejects a time-filtered request, retry once without tbs.
+        # Some Serper requests reject the time filter. Retry once without tbs.
         if resp.status_code == 400:
-            print(f"Serper 400 for query {query!r}: {resp.text[:500]}")
+            print(f"Serper 400 for query {query!r}, page {page}: {resp.text[:500]}")
             payload.pop("tbs", None)
             resp = requests.post(
                 "https://google.serper.dev/search",
@@ -412,58 +470,93 @@ def serper_search(query: str, hours: int) -> List[Dict[str, Any]]:
         print(f"Serper request failed: {exc}")
         return []
 
-def fetch_linkedin_post_results(profile: Dict[str, Any], hours: int) -> List[Dict[str, Any]]:
+def fetch_linkedin_post_results(
+    profile: Dict[str, Any],
+    hours: int,
+    min_match: int = 70,
+    target_results: int = 100,
+) -> List[Dict[str, Any]]:
     seen = set()
-    out = []
+    out: List[Dict[str, Any]] = []
+    queries = build_queries(profile)
 
-    for query in build_queries(profile):
-        for item in serper_search(query, hours):
-            url = item.get("link", "")
-            if "linkedin.com" not in url:
-                continue
-            if "/posts/" not in url and "/feed/update/" not in url:
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
+    # Search page 1 first. If we still have too few good JDs, expand to
+    # pages 2 and 3. Stop as soon as enough verified hiring posts are found.
+    for page in (1, 2, 3):
+        for query in queries:
+            for item in serper_search(query, hours, page=page):
+                raw_url = str(item.get("link", "")).strip()
+                if "linkedin.com" not in raw_url.lower():
+                    continue
+                if "/posts/" not in raw_url.lower() and "/feed/update/" not in raw_url.lower():
+                    continue
 
-            title = item.get("title") or "LinkedIn recruiter JD"
-            snippet = item.get("snippet") or ""
-            date_text = item.get("date")
-            combined = f"{title}\n{snippet}"
-            age_hours, posted_label = infer_age(date_text)
-            if age_hours > float(hours):
-                continue
-            match, matched, missing, blocked, warning, reason = score(profile, combined)
+                # Reject generic/stale LinkedIn links. An activity id lets us
+                # create a canonical URL that points to the exact post.
+                canonical_url = canonical_linkedin_post_url(raw_url)
+                if not canonical_url:
+                    continue
+                if canonical_url in seen:
+                    continue
 
-            out.append({
-                "id": url,
-                "source": "LinkedIn Post",
-                "title": title,
-                "company": "LinkedIn recruiter post",
-                "location": infer_location(combined),
-                "work_model": detect_work_model(combined),
-                "types": detect_types(combined),
-                "visas": detect_visas(combined),
-                "age_hours": age_hours,
-                "posted_label": posted_label,
-                "url": url,
-                "snippet": snippet,
-                "email": detect_email(combined),
-                "match": match,
-                "matched_skills": matched,
-                "missing_skills": missing,
-                "blocked": blocked,
-                "warning": warning,
-                "reason": reason
-            })
+                title = str(item.get("title") or "LinkedIn recruiter JD").strip()
+                snippet = str(item.get("snippet") or "").strip()
+                combined = f"{title}\n{snippet}"
+
+                # This is the main false-positive filter: normal LinkedIn
+                # content is excluded even if it mentions Java/AWS/etc.
+                if not is_hiring_post(combined):
+                    continue
+
+                date_text = item.get("date")
+                age_hours, posted_label = infer_age(date_text)
+                if age_hours > float(hours):
+                    continue
+
+                match, matched, missing, blocked, warning, reason = score(profile, combined)
+                if blocked or match < min_match:
+                    continue
+
+                seen.add(canonical_url)
+                out.append({
+                    "id": canonical_url,
+                    "source": "LinkedIn Post",
+                    "title": title,
+                    "company": "LinkedIn recruiter post",
+                    "location": infer_location(combined),
+                    "work_model": detect_work_model(combined),
+                    "types": detect_types(combined) or (["C2C"] if "c2c" in query.lower() else []),
+                    "visas": detect_visas(combined),
+                    "age_hours": age_hours,
+                    "posted_label": posted_label,
+                    "url": canonical_url,
+                    "snippet": snippet,
+                    "email": detect_email(combined),
+                    "match": match,
+                    "matched_skills": matched,
+                    "missing_skills": missing,
+                    "blocked": blocked,
+                    "warning": warning,
+                    "reason": reason
+                })
+
+                if len(out) >= target_results:
+                    break
+
+            if len(out) >= target_results:
+                break
+
+        # Avoid unnecessary Serper credit usage. Page 2/3 are used only when
+        # page 1 does not produce a useful number of verified recruiter JDs.
+        if len(out) >= 40 or len(out) >= target_results:
+            break
 
     out.sort(key=lambda x: (-x["match"], x["age_hours"]))
-    return out
+    return out[:target_results]
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "2.2.0", "serper_configured": bool((os.getenv("SERPER_API_KEY") or "").strip())}
+    return {"ok": True, "version": "2.4.0", "serper_configured": bool((os.getenv("SERPER_API_KEY") or "").strip())}
 
 @app.post("/api/resume/upload")
 async def upload_resume(file: UploadFile = File(...)):
@@ -476,7 +569,8 @@ async def upload_resume(file: UploadFile = File(...)):
 @app.get("/api/jds")
 def get_jds(
     hours: int = Query(24, ge=1, le=24),
-    min_match: int = Query(70, ge=0, le=100)
+    min_match: int = Query(70, ge=0, le=100),
+    limit: int = Query(100, ge=1, le=100)
 ):
     profile = load_profile()
     if not profile.get("skills"):
@@ -484,6 +578,18 @@ def get_jds(
     if not os.getenv("SERPER_API_KEY"):
         return {"jds": [], "message": "SERPER_API_KEY is not configured on Render."}
 
-    jds = fetch_linkedin_post_results(profile, hours)
-    jds = [j for j in jds if j["match"] >= min_match and not j["blocked"]]
-    return {"jds": jds}
+    jds = fetch_linkedin_post_results(
+        profile,
+        hours,
+        min_match=min_match,
+        target_results=limit,
+    )
+    return {
+        "jds": jds,
+        "count": len(jds),
+        "limit": limit,
+        "message": (
+            "Showing all matched public/indexed LinkedIn recruiter posts found "
+            "within the current search budget. LinkedIn/Google indexing is not unlimited."
+        ),
+    }
