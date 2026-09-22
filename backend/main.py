@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from docx import Document
 from pypdf import PdfReader
 
-app = FastAPI(title="JD Match AI API", version="2.4.0")
+app = FastAPI(title="JD Match AI API", version="2.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -307,20 +307,22 @@ def score(profile: Dict[str, Any], jd_text: str) -> tuple[int, List[str], List[s
         warning = True
         confirm_terms.append("visa restriction")
 
-    # Search snippets are incomplete. Prevent a tiny snippet from appearing as a perfect 100% match.
+    # Google/LinkedIn search snippets are incomplete. Keep the score honest:
+    # a tiny snippet can qualify as a strong visible-skill match, but cannot look perfect.
+    # This app intentionally surfaces only 88-100% preliminary matches.
     visible_skill_count = len(jd_skills)
     if visible_skill_count <= 2:
-        evidence_cap = 86
+        evidence_cap = 88
     elif visible_skill_count == 3:
-        evidence_cap = 90
+        evidence_cap = 92
     elif visible_skill_count == 4:
-        evidence_cap = 94
+        evidence_cap = 95
     elif visible_skill_count == 5:
-        evidence_cap = 96
+        evidence_cap = 97
     elif visible_skill_count <= 7:
-        evidence_cap = 98
-    else:
         evidence_cap = 99
+    else:
+        evidence_cap = 100
 
     # Missing a core visible skill should matter materially.
     core_skills = {"Java", "Spring Boot", "Microservices", "Angular", "React", "AWS", "Kafka", "Kubernetes"}
@@ -349,26 +351,29 @@ def score(profile: Dict[str, Any], jd_text: str) -> tuple[int, List[str], List[s
 def build_queries(profile: Dict[str, Any]) -> List[str]:
     skills = set(profile.get("skills", []))
 
-    # Broad but simple queries. Complex nested Google operators can be rejected
-    # by Serper, so use several focused searches instead.
+    # Discovery must be broad. Employment/visa/work-model are filters AFTER discovery,
+    # otherwise a default C2C query hides strong W2/1099/unspecified recruiter JDs.
+    # Keep queries simple because complex nested Google operators can trigger Serper 400s.
     if "Java" in skills:
         return [
-            "site:linkedin.com/posts Java C2C hiring",
-            "site:linkedin.com/posts Java Full Stack C2C",
-            "site:linkedin.com/posts Java Spring Boot C2C",
-            "site:linkedin.com/posts Java Microservices C2C",
-            "site:linkedin.com/posts Java Angular C2C",
-            "site:linkedin.com/posts Java React C2C",
-            "site:linkedin.com/posts Java AWS C2C",
-            "site:linkedin.com/posts Java Kafka C2C",
-            "site:linkedin.com/posts Senior Java C2C",
-            "site:linkedin.com/posts Lead Java C2C",
-            "site:linkedin.com/posts H1B C2C Java hiring",
-            "site:linkedin.com/posts Any Visa C2C Java hiring",
+            "site:linkedin.com/posts Java Full Stack hiring",
+            "site:linkedin.com/posts Java Backend hiring",
+            "site:linkedin.com/posts Java Spring Boot hiring",
+            "site:linkedin.com/posts Java Microservices hiring",
+            "site:linkedin.com/posts Java Angular hiring",
+            "site:linkedin.com/posts Java React hiring",
+            "site:linkedin.com/posts Java AWS hiring",
+            "site:linkedin.com/posts Java Kafka hiring",
+            "site:linkedin.com/posts Senior Java hiring recruiter",
+            "site:linkedin.com/posts Lead Java hiring recruiter",
+            "site:linkedin.com/posts C2C Java hiring",
+            "site:linkedin.com/posts W2 Java hiring",
+            "site:linkedin.com/posts H1B Java hiring",
+            "site:linkedin.com/posts Java Developer immediate opening",
         ]
 
-    top = list(skills)[:3]
-    query = "site:linkedin.com/posts C2C hiring"
+    top = list(skills)[:4]
+    query = "site:linkedin.com/posts hiring recruiter"
     if top:
         query += " " + " ".join(top)
     return [query]
@@ -380,11 +385,12 @@ def is_hiring_post(text: str) -> bool:
 
     hiring_signals = [
         r"\bhiring\b", r"\burgent hiring\b", r"\bimmediate hiring\b",
-        r"\bopening(?:s)?\b", r"\bjob opportunity\b", r"\bjob requirement\b",
-        r"\brequirement\b", r"\bposition\b", r"\brole\b",
+        r"\bimmediate opening\b", r"\bjob opening(?:s)?\b",
+        r"\bjob opportunity\b", r"\bjob requirement\b",
         r"\blooking for\b", r"\bseeking\b", r"\bwe are hiring\b",
         r"\binterested candidates\b", r"\bshare (?:your )?resume\b",
         r"\bsend (?:your )?resume\b", r"\bapply now\b",
+        r"\bposition\s*[:\-]", r"\brole\s*[:\-]",
     ]
     jd_signals = [
         r"\bc2c\b", r"corp[- ]?to[- ]?corp", r"\bw2\b",
@@ -431,58 +437,62 @@ def serper_search(query: str, hours: int, page: int = 1) -> List[Dict[str, Any]]
     if not key:
         return []
 
-    payload = {
+    base_payload = {
         "q": query,
-        "num": 10,
+        "num": 100,
         "page": page,
         "gl": "us",
         "hl": "en",
         "tbs": "qdr:h" if hours <= 1 else "qdr:d",
     }
 
-    try:
-        resp = requests.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": key, "Content-Type": "application/json"},
-            json=payload,
-            timeout=25,
-        )
+    attempts = [
+        dict(base_payload),
+        {k: v for k, v in base_payload.items() if k != "tbs"},
+        {**{k: v for k, v in base_payload.items() if k != "tbs"}, "num": 10},
+    ]
 
-        # Some Serper requests reject the time filter. Retry once without tbs.
-        if resp.status_code == 400:
-            print(f"Serper 400 for query {query!r}, page {page}: {resp.text[:500]}")
-            payload.pop("tbs", None)
+    for attempt_no, payload in enumerate(attempts, start=1):
+        try:
             resp = requests.post(
                 "https://google.serper.dev/search",
                 headers={"X-API-KEY": key, "Content-Type": "application/json"},
                 json=payload,
-                timeout=25,
+                timeout=30,
             )
-
-        if not resp.ok:
-            print(f"Serper error {resp.status_code}: {resp.text[:500]}")
+        except requests.RequestException as exc:
+            print(f"Serper request failed for {query!r}: {exc}")
             return []
 
-        data = resp.json()
-        return data.get("organic", []) or []
+        if resp.ok:
+            data = resp.json()
+            return data.get("organic", []) or []
 
-    except requests.RequestException as exc:
-        print(f"Serper request failed: {exc}")
-        return []
+        print(
+            f"Serper attempt {attempt_no} failed for query {query!r}, page {page}: "
+            f"HTTP {resp.status_code} {resp.text[:400]}"
+        )
+
+        # Only retry request-shape errors. Auth/rate-limit/server errors should stop.
+        if resp.status_code not in (400, 422):
+            return []
+
+    return []
+
 
 def fetch_linkedin_post_results(
     profile: Dict[str, Any],
     hours: int,
-    min_match: int = 70,
+    min_match: int = 88,
     target_results: int = 100,
 ) -> List[Dict[str, Any]]:
     seen = set()
     out: List[Dict[str, Any]] = []
     queries = build_queries(profile)
 
-    # Search page 1 first. If we still have too few good JDs, expand to
-    # pages 2 and 3. Stop as soon as enough verified hiring posts are found.
-    for page in (1, 2, 3):
+    # Each Serper request asks for a deep result set. Search page 2 only when
+    # page 1 across all query families still does not produce enough 88%+ JDs.
+    for page in (1, 2):
         for query in queries:
             for item in serper_search(query, hours, page=page):
                 raw_url = str(item.get("link", "")).strip()
@@ -525,7 +535,7 @@ def fetch_linkedin_post_results(
                     "company": "LinkedIn recruiter post",
                     "location": infer_location(combined),
                     "work_model": detect_work_model(combined),
-                    "types": detect_types(combined) or (["C2C"] if "c2c" in query.lower() else []),
+                    "types": detect_types(combined),
                     "visas": detect_visas(combined),
                     "age_hours": age_hours,
                     "posted_label": posted_label,
@@ -546,9 +556,9 @@ def fetch_linkedin_post_results(
             if len(out) >= target_results:
                 break
 
-        # Avoid unnecessary Serper credit usage. Page 2/3 are used only when
-        # page 1 does not produce a useful number of verified recruiter JDs.
-        if len(out) >= 40 or len(out) >= target_results:
+        # Avoid unnecessary credit usage: page 2 is only needed when page 1
+        # across all broad queries found fewer than 30 strong matches.
+        if len(out) >= 30 or len(out) >= target_results:
             break
 
     out.sort(key=lambda x: (-x["match"], x["age_hours"]))
@@ -556,7 +566,7 @@ def fetch_linkedin_post_results(
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "2.4.0", "serper_configured": bool((os.getenv("SERPER_API_KEY") or "").strip())}
+    return {"ok": True, "version": "2.5.0", "serper_configured": bool((os.getenv("SERPER_API_KEY") or "").strip())}
 
 @app.post("/api/resume/upload")
 async def upload_resume(file: UploadFile = File(...)):
@@ -569,7 +579,7 @@ async def upload_resume(file: UploadFile = File(...)):
 @app.get("/api/jds")
 def get_jds(
     hours: int = Query(24, ge=1, le=24),
-    min_match: int = Query(70, ge=0, le=100),
+    min_match: int = Query(88, ge=0, le=100),
     limit: int = Query(100, ge=1, le=100)
 ):
     profile = load_profile()
